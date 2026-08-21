@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// apalis-imx8_dotstar-spi-gpio.dts
+//
+// In-kernel bit-bang SPI master nad temi SAMYMI dvema piny, ktere uz ma
+// proposal alokovane pro DotStar. Zadna zmena zapojeni ani interface desky.
+//
+//   X27 pin 16 = GPIO4 -> MOSI (DAT)
+//   X27 pin 17 = GPIO5 -> SCK  (CLK)
+//
+// Proc kernelovy bit-bang misto Pythonu:
+//   - cely snimek odejde jednim ioctl misto ~3000 syscallu
+//   - jitter je radove nizsi, pulz nezavisi na GIL ani na tom, co dela
+//     provisioning thread
+//   - CPU zatez klesne z desitek procent jadra na sum
+//
+// Proc ne ECSPI: sbernici ECSPI1 zabiraji ctecky PN532 a SK9822 NEMA chip
+// select - kazdy clock, ktery na sbernici uvidi, si prelozi jako barvy.
+// Bit-bang master je fyzicky oddeleny, takze problem nevznikne.
+//
+// Bonus: problem s ECSPI, ktery deasertuje SS mezi slovy burstu, se tu
+// vubec neprojevi. num-chipselects = <0> znamena, ze se CS neuplatnuje.
+//
+// -----------------------------------------------------------------------
+// TODO pred pouzitim - tri veci, ktere je nutne dohledat na cili:
+//
+// [1] PHANDLE GPIO KONTROLERU
+//     Mapovani ze zaznamu bring-upu:
+//        GPIO4 = gpiochip0 offset 13
+//        GPIO5 = gpiochip4 offset 1
+//     Cisla gpiochipu z /sys NEODPOVIDAJI automaticky jmenum lsio_gpioN
+//     v device tree. Parovani zjistis takto:
+//        for d in /sys/class/gpio/gpiochip*; do \
+//            echo "$d $(cat $d/label) base=$(cat $d/base)"; done
+//     Label je adresa registru (napr. 5d080000.gpio); tu dohledej
+//     v arch/arm64/boot/dts/freescale/imx8-ss-lsio.dtsi a podle ni doplnit
+//     spravne &lsio_gpioN nize.
+//
+// [2] PINMUX
+//     Oba pady musi byt premuxovane na ALT GPIO. Nazvy padu pro MXM3_9
+//     a MXM3_11 najdes v apalis-imx8.dtsi u uzlu pinctrl_gpio*.
+//     Pokud uz je maji z vychoziho DT jako GPIO (bring-up je pres
+//     periphery ovladal, takze pravdepodobne ano), sekci pinctrl vypustit.
+//
+// [3] REGISTRACE
+//     dtc -@ -I dts -O dtb -o apalis-imx8_dotstar-spi-gpio.dtbo \
+//         apalis-imx8_dotstar-spi-gpio.dts
+//     kopie do /boot/ostree/.../overlays/ a pridat radek do
+//     /boot/overlays.txt, pak reboot.
+//     Na TorizonOS je cistsi cesta pres kontejner torizon/dt-overlays.
+// -----------------------------------------------------------------------
+
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	compatible = "toradex,apalis-imx8";
+};
+
+&{/} {
+	dotstar_spi: spi-gpio-dotstar {
+		compatible = "spi-gpio";
+		status = "okay";
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/* TODO [1]: overit phandle a offsety */
+		sck-gpios  = <&lsio_gpio4  1 GPIO_ACTIVE_HIGH>;   /* X27 17, GPIO5 */
+		mosi-gpios = <&lsio_gpio0 13 GPIO_ACTIVE_HIGH>;   /* X27 16, GPIO4 */
+
+		/*
+		 * miso-gpios se zamerne neuvadi - SK9822 je jednosmerny.
+		 * num-chipselects = <0> rekne driveru, ze na sbernici visi
+		 * jedno zarizeni bez chip selectu.
+		 */
+		num-chipselects = <0>;
+
+		dotstar@0 {
+			/*
+			 * "rohm,dh2228fv" je zavedeny compatible, ktery je
+			 * v ID tabulce spidev driveru. Diky nemu se uzel
+			 * navaze na spidev bez kernelove warningu, ktery
+			 * generuje holy retezec "spidev".
+			 */
+			compatible = "rohm,dh2228fv";
+			reg = <0>;
+
+			/*
+			 * spi-gpio ignoruje pozadovanou frekvenci jako cil
+			 * a bere ji jako STROP - realny clock urcuje rychlost
+			 * togglovani GPIO, typicky 1-3 MHz. SK9822 nema dolni
+			 * ani horni casovy limit, takze na presne hodnote
+			 * nezalezi. 2 MHz je bezpecne pri delsi kabelazi
+			 * pres ctyri konektory hnizd.
+			 */
+			spi-max-frequency = <2000000>;
+		};
+	};
+};
